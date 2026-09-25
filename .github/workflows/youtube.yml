@@ -1,0 +1,269 @@
+﻿name: Update YouTube latest video
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-youtube:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # =========================
+      # GitHubリポジトリを取得
+      # =========================
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+
+      # =========================
+      # YouTubeチャンネルページを取得
+      # =========================
+
+      - name: Get YouTube channel page
+        run: |
+          curl -L \
+            -A "Mozilla/5.0" \
+            "https://www.youtube.com/@Mula" \
+            -o /tmp/youtube-channel.html
+
+
+      # =========================
+      # チャンネルIDを自動取得
+      # =========================
+
+      - name: Extract channel ID
+        run: |
+
+          python3 <<'PY'
+
+          import re
+
+          with open(
+              "/tmp/youtube-channel.html",
+              "r",
+              encoding="utf-8",
+              errors="ignore"
+          ) as f:
+
+              html = f.read()
+
+
+          patterns = [
+
+              r'itemprop="channelId"\s+content="(UC[A-Za-z0-9_-]+)"',
+
+              r'"channelId":"(UC[A-Za-z0-9_-]+)"',
+
+              r'"externalId":"(UC[A-Za-z0-9_-]+)"'
+
+          ]
+
+
+          channel_id = None
+
+
+          for pattern in patterns:
+
+              match = re.search(pattern, html)
+
+              if match:
+
+                  channel_id = match.group(1)
+
+                  break
+
+
+          if not channel_id:
+
+              raise RuntimeError(
+                  "YouTube channel ID could not be found."
+              )
+
+
+          print("Channel ID:", channel_id)
+
+
+          with open(
+              "/tmp/channel_id",
+              "w",
+              encoding="utf-8"
+          ) as f:
+
+              f.write(channel_id)
+
+          PY
+
+
+      # =========================
+      # YouTube RSS取得
+      # =========================
+
+      - name: Get YouTube RSS
+        run: |
+
+          CHANNEL_ID=$(cat /tmp/channel_id)
+
+          echo "Using channel ID: $CHANNEL_ID"
+
+          curl -L \
+            -A "Mozilla/5.0" \
+            "https://www.youtube.com/feeds/videos.xml?channel_id=${CHANNEL_ID}" \
+            -o /tmp/youtube.xml
+
+
+      # =========================
+      # RSS → JSON
+      # 最新1件だけ取得
+      # =========================
+
+      - name: Convert RSS to JSON
+        run: |
+
+          mkdir -p data
+
+          python3 <<'PY'
+
+          import xml.etree.ElementTree as ET
+          import json
+
+
+          root = ET.parse(
+              "/tmp/youtube.xml"
+          ).getroot()
+
+
+          ns = {
+
+              "atom":
+                  "http://www.w3.org/2005/Atom",
+
+              "yt":
+                  "http://www.youtube.com/xml/schemas/2015"
+
+          }
+
+
+          videos = []
+
+
+          entries = root.findall(
+              "atom:entry",
+              ns
+          )
+
+
+          # 最新動画1件だけ取得
+          for entry in entries[:1]:
+
+              video_id_element = entry.find(
+                  "yt:videoId",
+                  ns
+              )
+
+              title_element = entry.find(
+                  "atom:title",
+                  ns
+              )
+
+              published_element = entry.find(
+                  "atom:published",
+                  ns
+              )
+
+
+              if (
+                  video_id_element is None
+                  or title_element is None
+                  or published_element is None
+              ):
+
+                  continue
+
+
+              video_id = video_id_element.text
+
+              title = title_element.text
+
+              published = published_element.text
+
+
+              videos.append({
+
+                  "id":
+                      video_id,
+
+                  "title":
+                      title,
+
+                  "published":
+                      published,
+
+                  "url":
+                      f"https://www.youtube.com/watch?v={video_id}",
+
+                  "thumbnail":
+                      f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+
+              })
+
+
+          with open(
+              "data/youtube.json",
+              "w",
+              encoding="utf-8"
+          ) as f:
+
+              json.dump(
+
+                  {
+                      "videos": videos
+                  },
+
+                  f,
+
+                  ensure_ascii=False,
+
+                  indent=2
+
+              )
+
+          PY
+
+
+      # =========================
+      # GitHubに保存
+      # =========================
+
+      - name: Commit updated JSON
+        run: |
+
+          git config user.name \
+            "github-actions[bot]"
+
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+
+          git add data/youtube.json
+
+
+          if git diff --cached --quiet; then
+
+            echo "No changes."
+
+          else
+
+            git commit \
+              -m "Update latest YouTube video"
+
+            git push
+
+          fi
